@@ -1,30 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { kv } from '@vercel/kv';
 import { v4 as uuidv4 } from 'uuid';
 import { Project } from '@/features/types';
 
-const PROJECTS_FILE = path.join(process.cwd(), 'public', 'generated-images', 'projects.json');
-const PROJECTS_DIR = path.join(process.cwd(), 'public', 'generated-images', 'projects');
-
-async function ensureProjectsFile(): Promise<void> {
+async function readProjects(): Promise<Project[]> {
   try {
-    await fs.access(PROJECTS_FILE);
-  } catch {
-    await fs.mkdir(path.dirname(PROJECTS_FILE), { recursive: true });
-    await fs.writeFile(PROJECTS_FILE, JSON.stringify({ projects: [] }, null, 2));
+    const projects = await kv.get<Project[]>('projects');
+    return projects || [];
+  } catch (error) {
+    console.error('Error reading projects from KV:', error);
+    return [];
   }
 }
 
-async function readProjects(): Promise<Project[]> {
-  await ensureProjectsFile();
-  const data = await fs.readFile(PROJECTS_FILE, 'utf-8');
-  const parsed = JSON.parse(data);
-  return parsed.projects || [];
-}
-
 async function writeProjects(projects: Project[]): Promise<void> {
-  await fs.writeFile(PROJECTS_FILE, JSON.stringify({ projects }, null, 2));
+  try {
+    await kv.set('projects', projects);
+  } catch (error) {
+    console.error('Error writing projects to KV:', error);
+    throw error;
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -62,16 +57,8 @@ export async function POST(request: NextRequest) {
       imageCount: 0,
     };
 
-    // Create project directory
-    const projectDir = path.join(PROJECTS_DIR, newProject.id);
-    await fs.mkdir(path.join(projectDir, 'images'), { recursive: true });
-
-    // Create metadata file
-    const metadataFile = path.join(projectDir, 'metadata.json');
-    await fs.writeFile(
-      metadataFile,
-      JSON.stringify({ images: [] }, null, 2)
-    );
+    // Initialize empty images array in KV for this project
+    await kv.set(`project:${newProject.id}:images`, []);
 
     projects.push(newProject);
     await writeProjects(projects);

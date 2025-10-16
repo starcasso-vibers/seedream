@@ -1,20 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { GeneratedImage } from '@/features/types';
+import { kv } from '@vercel/kv';
+import { GeneratedImage, Project } from '@/features/types';
 
 // Mark this route as dynamic since it uses searchParams
 export const dynamic = 'force-dynamic';
 
-const PROJECTS_DIR = path.join(process.cwd(), 'public', 'generated-images', 'projects');
-
-async function readMetadata(projectId: string): Promise<{ images: GeneratedImage[] }> {
-  const metadataFile = path.join(PROJECTS_DIR, projectId, 'metadata.json');
+async function readProjectImages(projectId: string): Promise<GeneratedImage[]> {
   try {
-    const data = await fs.readFile(metadataFile, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return { images: [] };
+    const images = await kv.get<GeneratedImage[]>(`project:${projectId}:images`);
+    return images || [];
+  } catch (error) {
+    console.error('Error reading project images from KV:', error);
+    return [];
   }
 }
 
@@ -39,19 +36,17 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Verify project directory exists
-    const projectDir = path.join(PROJECTS_DIR, projectId);
-    try {
-      await fs.access(projectDir);
-    } catch {
+    // Verify project exists in KV
+    const projects = await kv.get<Project[]>('projects');
+    const projectExists = projects?.some(p => p.id === projectId);
+    if (!projectExists) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }
       );
     }
 
-    const metadata = await readMetadata(projectId);
-    const allImages = metadata.images || [];
+    const allImages = await readProjectImages(projectId);
 
     // Sort by createdAt descending (newest first)
     allImages.sort((a, b) =>

@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { put } from '@vercel/blob';
+import { kv } from '@vercel/kv';
 import { v4 as uuidv4 } from 'uuid';
 import { GeneratedImage, Project } from '@/features/types';
 
-const PROJECTS_FILE = path.join(process.cwd(), 'public', 'generated-images', 'projects.json');
-const PROJECTS_DIR = path.join(process.cwd(), 'public', 'generated-images', 'projects');
 const ARK_API_ENDPOINT = 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations';
 const ARK_API_KEY = process.env.ARK_API_KEY;
 
@@ -22,42 +20,59 @@ interface ArkApiResponse {
   };
 }
 
+// Helper functions using Vercel KV
 async function readProjects(): Promise<Project[]> {
   try {
-    const data = await fs.readFile(PROJECTS_FILE, 'utf-8');
-    const parsed = JSON.parse(data);
-    return parsed.projects || [];
-  } catch {
+    const projects = await kv.get<Project[]>('projects');
+    return projects || [];
+  } catch (error) {
+    console.error('Error reading projects from KV:', error);
     return [];
   }
 }
 
 async function writeProjects(projects: Project[]): Promise<void> {
-  await fs.writeFile(PROJECTS_FILE, JSON.stringify({ projects }, null, 2));
+  try {
+    await kv.set('projects', projects);
+  } catch (error) {
+    console.error('Error writing projects to KV:', error);
+    throw error;
+  }
 }
 
-async function downloadImage(url: string, filepath: string): Promise<void> {
+async function readProjectImages(projectId: string): Promise<GeneratedImage[]> {
+  try {
+    const images = await kv.get<GeneratedImage[]>(`project:${projectId}:images`);
+    return images || [];
+  } catch (error) {
+    console.error('Error reading project images from KV:', error);
+    return [];
+  }
+}
+
+async function writeProjectImages(projectId: string, images: GeneratedImage[]): Promise<void> {
+  try {
+    await kv.set(`project:${projectId}:images`, images);
+  } catch (error) {
+    console.error('Error writing project images to KV:', error);
+    throw error;
+  }
+}
+
+async function uploadImageToBlob(url: string, filename: string): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to download image: ${response.statusText}`);
   }
   const buffer = await response.arrayBuffer();
-  await fs.writeFile(filepath, Buffer.from(buffer));
-}
 
-async function readMetadata(projectId: string): Promise<{ images: GeneratedImage[] }> {
-  const metadataFile = path.join(PROJECTS_DIR, projectId, 'metadata.json');
-  try {
-    const data = await fs.readFile(metadataFile, 'utf-8');
-    return JSON.parse(data);
-  } catch {
-    return { images: [] };
-  }
-}
+  // Upload to Vercel Blob
+  const blob = await put(filename, buffer, {
+    access: 'public',
+    contentType: 'image/png',
+  });
 
-async function writeMetadata(projectId: string, metadata: { images: GeneratedImage[] }): Promise<void> {
-  const metadataFile = path.join(PROJECTS_DIR, projectId, 'metadata.json');
-  await fs.writeFile(metadataFile, JSON.stringify(metadata, null, 2));
+  return blob.url;
 }
 
 export async function POST(request: NextRequest) {
@@ -111,8 +126,8 @@ export async function POST(request: NextRequest) {
     let sizeValue = '2K';
     if (size === '4K') sizeValue = '4K';
 
-    // Call ARK API with correct parameters
-    const requestBody = {
+    // Prepare base request body
+    const baseRequestBody = {
       model: 'seedream-4-0-250828',
       prompt: prompt,
       sequential_image_generation: 'disabled',
@@ -120,86 +135,96 @@ export async function POST(request: NextRequest) {
       size: sizeValue,
       stream: false,
       watermark: watermark,
-      n: numImages,
+      n: 1, // Always request 1 image per call (ARK API limitation)
       ...(refImgBase64.length > 0 && {
         image: refImgBase64.map(b64 => `data:image/jpeg;base64,${b64}`)
       }),
     };
 
-    const arkResponse = await fetch(ARK_API_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${ARK_API_KEY}`,
-      },
-      body: JSON.stringify(requestBody),
-    });
+    const generatedImages: GeneratedImage[] = [];
 
-    if (!arkResponse.ok) {
-      const errorText = await arkResponse.text();
-      console.error('ARK API Error:', errorText);
-      let errorMessage = 'Failed to generate images';
+    // Generate images sequentially (ARK API doesn't support batch generation)
+    for (let i = 0; i < numImages; i++) {
+      console.log(`=== Generating image ${i + 1}/${numImages} ===`);
+      console.log('Request body:', JSON.stringify(baseRequestBody, null, 2));
 
       try {
-        const errorData = JSON.parse(errorText);
-        errorMessage = errorData.error?.message || errorData.message || errorMessage;
-      } catch {
-        errorMessage = errorText || errorMessage;
-      }
+        const arkResponse = await fetch(ARK_API_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${ARK_API_KEY}`,
+          },
+          body: JSON.stringify(baseRequestBody),
+        });
 
+        if (!arkResponse.ok) {
+          const errorText = await arkResponse.text();
+          console.error(`ARK API Error for image ${i + 1}:`, errorText);
+
+          // Continue with other images even if one fails
+          continue;
+        }
+
+        const arkData: ArkApiResponse = await arkResponse.json();
+        console.log(`Received ${arkData.data.length} image(s) for request ${i + 1}`);
+
+        // Upload each image to Vercel Blob
+        for (const imageData of arkData.data) {
+          const imageId = uuidv4();
+          const filename = `projects/${projectId}/${imageId}.png`;
+
+          // Upload to Vercel Blob
+          const blobUrl = await uploadImageToBlob(imageData.url, filename);
+          console.log(`Uploaded to Blob: ${blobUrl}`);
+
+          // Determine dimensions from size value
+          const width = sizeValue === '4K' ? 4096 : 2048;
+          const height = width;
+
+          const generatedImage: GeneratedImage = {
+            id: imageId,
+            projectId,
+            filename: `${imageId}.png`,
+            url: blobUrl, // Use Blob URL instead of local path
+            prompt,
+            size,
+            width,
+            height,
+            createdAt: new Date().toISOString(),
+            metadata: {
+              seedreamRequestId: arkData.created.toString(),
+              watermark,
+            },
+          };
+
+          generatedImages.push(generatedImage);
+        }
+      } catch (error) {
+        console.error(`Error generating image ${i + 1}:`, error);
+        // Continue with other images
+        continue;
+      }
+    }
+
+    // Check if any images were generated
+    if (generatedImages.length === 0) {
       return NextResponse.json(
-        { error: errorMessage },
-        { status: arkResponse.status }
+        { error: 'Failed to generate any images' },
+        { status: 500 }
       );
     }
 
-    const arkData: ArkApiResponse = await arkResponse.json();
+    console.log(`=== Successfully generated ${generatedImages.length} images ===`);
 
-    // Download and save images
-    const imagesDir = path.join(PROJECTS_DIR, projectId, 'images');
-    await fs.mkdir(imagesDir, { recursive: true });
+    // Update project images in KV
+    const existingImages = await readProjectImages(projectId);
+    const allImages = [...existingImages, ...generatedImages];
+    await writeProjectImages(projectId, allImages);
 
-    const generatedImages: GeneratedImage[] = [];
-    const downloadPromises = arkData.data.map(async (imageData) => {
-      const imageId = uuidv4();
-      const filename = `${imageId}.png`;
-      const filepath = path.join(imagesDir, filename);
-
-      await downloadImage(imageData.url, filepath);
-
-      // Determine dimensions from size value
-      const width = sizeValue === '4K' ? 4096 : 2048;
-      const height = width;
-
-      const generatedImage: GeneratedImage = {
-        id: imageId,
-        projectId,
-        filename,
-        url: `/generated-images/projects/${projectId}/images/${filename}`,
-        prompt,
-        size,
-        width,
-        height,
-        createdAt: new Date().toISOString(),
-        metadata: {
-          seedreamRequestId: arkData.created.toString(),
-          watermark,
-        },
-      };
-
-      generatedImages.push(generatedImage);
-    });
-
-    await Promise.all(downloadPromises);
-
-    // Update metadata.json
-    const metadata = await readMetadata(projectId);
-    metadata.images.push(...generatedImages);
-    await writeMetadata(projectId, metadata);
-
-    // Update project
+    // Update project metadata
     const project = projects[projectIndex];
-    project.imageCount = metadata.images.length;
+    project.imageCount = allImages.length;
     project.updatedAt = new Date().toISOString();
     await writeProjects(projects);
 
