@@ -36,3 +36,9 @@ next-env.d.ts
 # Generated images
 /public/generated-images/*
 !/public/generated-images/.gitkeep
+
+# Claude Flow metrics
+.claude-flow/
+
+# Swarm memory files
+.swarm/
