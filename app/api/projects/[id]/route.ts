@@ -1,51 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { promises as fs } from 'fs';
-import path from 'path';
 import { Project } from '@/features/types';
-
-const PROJECTS_FILE = path.join(process.cwd(), 'public', 'generated-images', 'projects.json');
-const PROJECTS_DIR = path.join(process.cwd(), 'public', 'generated-images', 'projects');
-
-async function readProjects(): Promise<Project[]> {
-  try {
-    const data = await fs.readFile(PROJECTS_FILE, 'utf-8');
-    const parsed = JSON.parse(data);
-    return parsed.projects || [];
-  } catch {
-    return [];
-  }
-}
-
-async function writeProjects(projects: Project[]): Promise<void> {
-  await fs.writeFile(PROJECTS_FILE, JSON.stringify({ projects }, null, 2));
-}
-
-async function deleteDirectory(dirPath: string): Promise<void> {
-  try {
-    const stats = await fs.stat(dirPath);
-    if (stats.isDirectory()) {
-      const files = await fs.readdir(dirPath);
-      await Promise.all(
-        files.map((file) => deleteDirectory(path.join(dirPath, file)))
-      );
-      await fs.rmdir(dirPath);
-    } else {
-      await fs.unlink(dirPath);
-    }
-  } catch (error) {
-    // Ignore errors if file/dir doesn't exist
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
-    }
-  }
-}
+import { storage } from '@/lib/storage';
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const projects = await readProjects();
+    const projects = await storage.getProjects();
     const project = projects.find((p) => p.id === params.id);
 
     if (!project) {
@@ -73,7 +35,7 @@ export async function PATCH(
     const body = await request.json();
     const { name, description } = body;
 
-    const projects = await readProjects();
+    const projects = await storage.getProjects();
     const projectIndex = projects.findIndex((p) => p.id === params.id);
 
     if (projectIndex === -1) {
@@ -102,7 +64,7 @@ export async function PATCH(
     project.updatedAt = new Date().toISOString();
     projects[projectIndex] = project;
 
-    await writeProjects(projects);
+    await storage.setProjects(projects);
 
     return NextResponse.json(project, { status: 200 });
   } catch (error) {
@@ -119,7 +81,7 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    const projects = await readProjects();
+    const projects = await storage.getProjects();
     const projectIndex = projects.findIndex((p) => p.id === params.id);
 
     if (projectIndex === -1) {
@@ -129,13 +91,20 @@ export async function DELETE(
       );
     }
 
-    // Delete project directory and all images
-    const projectDir = path.join(PROJECTS_DIR, params.id);
-    await deleteDirectory(projectDir);
+    // Delete all images for this project
+    const images = await storage.getProjectImages(params.id);
+    for (const image of images) {
+      try {
+        await storage.deleteImage(image.url);
+      } catch (error) {
+        console.error(`Failed to delete image ${image.url}:`, error);
+        // Continue deleting other images even if one fails
+      }
+    }
 
     // Remove from projects list
     projects.splice(projectIndex, 1);
-    await writeProjects(projects);
+    await storage.setProjects(projects);
 
     return NextResponse.json(
       { message: 'Project deleted successfully' },

@@ -1,30 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { kv } from '@vercel/kv';
 import { v4 as uuidv4 } from 'uuid';
 import { Project } from '@/features/types';
-
-async function readProjects(): Promise<Project[]> {
-  try {
-    const projects = await kv.get<Project[]>('projects');
-    return projects || [];
-  } catch (error) {
-    console.error('Error reading projects from KV:', error);
-    return [];
-  }
-}
-
-async function writeProjects(projects: Project[]): Promise<void> {
-  try {
-    await kv.set('projects', projects);
-  } catch (error) {
-    console.error('Error writing projects to KV:', error);
-    throw error;
-  }
-}
+import { storage } from '@/lib/storage';
 
 export async function GET(request: NextRequest) {
   try {
-    const projects = await readProjects();
+    const projects = await storage.getProjects();
     return NextResponse.json({ projects }, { status: 200 });
   } catch (error) {
     console.error('Error fetching projects:', error);
@@ -47,7 +28,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const projects = await readProjects();
+    const projects = await storage.getProjects();
     const newProject: Project = {
       id: uuidv4(),
       name: name.trim(),
@@ -57,11 +38,11 @@ export async function POST(request: NextRequest) {
       imageCount: 0,
     };
 
-    // Initialize empty images array in KV for this project
-    await kv.set(`project:${newProject.id}:images`, []);
+    // Initialize empty images array for this project
+    await storage.setProjectImages(newProject.id, []);
 
     projects.push(newProject);
-    await writeProjects(projects);
+    await storage.setProjects(projects);
 
     return NextResponse.json(newProject, { status: 201 });
   } catch (error) {

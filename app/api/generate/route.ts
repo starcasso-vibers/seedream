@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { put } from '@vercel/blob';
-import { kv } from '@vercel/kv';
 import { v4 as uuidv4 } from 'uuid';
 import { GeneratedImage, Project } from '@/features/types';
+import { storage } from '@/lib/storage';
 
 const ARK_API_ENDPOINT = 'https://ark.ap-southeast.bytepluses.com/api/v3/images/generations';
 const ARK_API_KEY = process.env.ARK_API_KEY;
@@ -20,59 +19,12 @@ interface ArkApiResponse {
   };
 }
 
-// Helper functions using Vercel KV
-async function readProjects(): Promise<Project[]> {
-  try {
-    const projects = await kv.get<Project[]>('projects');
-    return projects || [];
-  } catch (error) {
-    console.error('Error reading projects from KV:', error);
-    return [];
-  }
-}
-
-async function writeProjects(projects: Project[]): Promise<void> {
-  try {
-    await kv.set('projects', projects);
-  } catch (error) {
-    console.error('Error writing projects to KV:', error);
-    throw error;
-  }
-}
-
-async function readProjectImages(projectId: string): Promise<GeneratedImage[]> {
-  try {
-    const images = await kv.get<GeneratedImage[]>(`project:${projectId}:images`);
-    return images || [];
-  } catch (error) {
-    console.error('Error reading project images from KV:', error);
-    return [];
-  }
-}
-
-async function writeProjectImages(projectId: string, images: GeneratedImage[]): Promise<void> {
-  try {
-    await kv.set(`project:${projectId}:images`, images);
-  } catch (error) {
-    console.error('Error writing project images to KV:', error);
-    throw error;
-  }
-}
-
-async function uploadImageToBlob(url: string, filename: string): Promise<string> {
+async function downloadImageBuffer(url: string): Promise<ArrayBuffer> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to download image: ${response.statusText}`);
   }
-  const buffer = await response.arrayBuffer();
-
-  // Upload to Vercel Blob
-  const blob = await put(filename, buffer, {
-    access: 'public',
-    contentType: 'image/png',
-  });
-
-  return blob.url;
+  return await response.arrayBuffer();
 }
 
 export async function POST(request: NextRequest) {
@@ -101,7 +53,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Verify project exists
-    const projects = await readProjects();
+    const projects = await storage.getProjects();
     const projectIndex = projects.findIndex((p) => p.id === projectId);
     if (projectIndex === -1) {
       return NextResponse.json(
@@ -169,14 +121,15 @@ export async function POST(request: NextRequest) {
         const arkData: ArkApiResponse = await arkResponse.json();
         console.log(`Received ${arkData.data.length} image(s) for request ${i + 1}`);
 
-        // Upload each image to Vercel Blob
+        // Upload each image using storage adapter
         for (const imageData of arkData.data) {
           const imageId = uuidv4();
           const filename = `projects/${projectId}/${imageId}.png`;
 
-          // Upload to Vercel Blob
-          const blobUrl = await uploadImageToBlob(imageData.url, filename);
-          console.log(`Uploaded to Blob: ${blobUrl}`);
+          // Download image and upload via storage adapter
+          const buffer = await downloadImageBuffer(imageData.url);
+          const imageUrl = await storage.uploadImage(buffer, filename);
+          console.log(`Uploaded image: ${imageUrl}`);
 
           // Determine dimensions from size value
           const width = sizeValue === '4K' ? 4096 : 2048;
@@ -186,7 +139,7 @@ export async function POST(request: NextRequest) {
             id: imageId,
             projectId,
             filename: `${imageId}.png`,
-            url: blobUrl, // Use Blob URL instead of local path
+            url: imageUrl,
             prompt,
             size,
             width,
@@ -217,16 +170,16 @@ export async function POST(request: NextRequest) {
 
     console.log(`=== Successfully generated ${generatedImages.length} images ===`);
 
-    // Update project images in KV
-    const existingImages = await readProjectImages(projectId);
+    // Update project images
+    const existingImages = await storage.getProjectImages(projectId);
     const allImages = [...existingImages, ...generatedImages];
-    await writeProjectImages(projectId, allImages);
+    await storage.setProjectImages(projectId, allImages);
 
     // Update project metadata
     const project = projects[projectIndex];
     project.imageCount = allImages.length;
     project.updatedAt = new Date().toISOString();
-    await writeProjects(projects);
+    await storage.setProjects(projects);
 
     return NextResponse.json(
       {
