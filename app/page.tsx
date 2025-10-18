@@ -33,7 +33,7 @@ export default function HomePage() {
   );
   const deleteMutation = useDeleteImage();
 
-  // Handle image generation
+  // Handle image generation (async/non-blocking)
   const handleGenerate = async (values: any) => {
     if (!activeProject) {
       toast({
@@ -54,24 +54,17 @@ export default function HomePage() {
         projectId: activeProject.id,
       };
 
-      const result = await generateMutation.mutateAsync(params);
+      // Generation is now async - job is queued immediately
+      const { jobId } = await generateMutation.mutateAsync(params);
 
-      if (result.success) {
-        toast({
-          title: "Success",
-          description: `Generated ${result.images.length} image${result.images.length > 1 ? 's' : ''}`,
-        });
-      } else {
-        toast({
-          title: "Generation Failed",
-          description: result.error || "Unknown error occurred",
-          variant: "destructive",
-        });
-      }
+      toast({
+        title: "Generation Started",
+        description: "Your images are being generated. You can continue working while we process your request.",
+      });
     } catch (error) {
       toast({
         title: "Error",
-        description: error instanceof Error ? error.message : "Failed to generate images",
+        description: error instanceof Error ? error.message : "Failed to start generation",
         variant: "destructive",
       });
     }

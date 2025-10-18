@@ -2,7 +2,10 @@
 
 import React from 'react';
 import { ImageCard } from '@/features/image-generation/components/ImageCard';
+import { LoadingCard } from '@/features/image-generation/components/LoadingCard';
 import { ImageMetadata } from '@/features/image-generation/types/image';
+import { useProjectStore } from '@/lib/stores/project-store';
+import { useJobProgressSimulation } from '@/features/image-generation/hooks/use-image-generation';
 
 interface ProjectGalleryProps {
   images: ImageMetadata[];
@@ -76,6 +79,26 @@ export function ProjectGallery({
   isLoading = false,
   onDeleteImage,
 }: ProjectGalleryProps) {
+  const { jobs } = useProjectStore();
+
+  // Enable job progress simulation
+  useJobProgressSimulation();
+
+  // Get active jobs for current project (pending or processing)
+  const activeJobs = React.useMemo(() => {
+    if (!projectId) return [];
+    return jobs
+      .filter(
+        (job) =>
+          job.projectId === projectId &&
+          (job.status === 'pending' || job.status === 'processing')
+      )
+      .sort((a, b) => {
+        // Sort by latest first
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+  }, [jobs, projectId]);
+
   // Filter images by active project
   const filteredImages = React.useMemo(() => {
     if (!projectId) return [];
@@ -91,7 +114,7 @@ export function ProjectGallery({
     return <GallerySkeleton />;
   }
 
-  if (filteredImages.length === 0) {
+  if (filteredImages.length === 0 && activeJobs.length === 0) {
     return <EmptyState projectId={projectId} />;
   }
 
@@ -99,11 +122,22 @@ export function ProjectGallery({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
+          {activeJobs.length > 0 && (
+            <span className="mr-3 text-primary">
+              {activeJobs.length} generating
+            </span>
+          )}
           {filteredImages.length} {filteredImages.length === 1 ? 'image' : 'images'}
         </p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {/* Loading cards first (at top of gallery) */}
+        {activeJobs.map((job) => (
+          <LoadingCard key={job.id} job={job} />
+        ))}
+
+        {/* Then actual images (latest first) */}
         {filteredImages.map((image) => (
           <ImageCard
             key={image.id}

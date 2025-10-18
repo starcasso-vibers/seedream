@@ -1,10 +1,13 @@
 /**
  * React Query hooks for image generation
- * Handles image generation, fetching, and deletion with optimistic updates
+ * Handles async image generation with polling, fetching, and deletion with optimistic updates
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import { useProjectStore } from '@/lib/stores/project-store';
+import type { GenerationJob } from '../types/generation-job';
 import type {
   GenerationParams,
   ImageMetadata,
@@ -18,113 +21,122 @@ export const imageKeys = {
 };
 
 /**
- * Mock storage for images (replace with actual backend API)
- */
-const imageStorage = {
-  async getProjectImages(projectId: string): Promise<ImageMetadata[]> {
-    const key = `project_images_${projectId}`;
-    const stored = localStorage.getItem(key);
-    return stored ? JSON.parse(stored) : [];
-  },
-
-  async saveImage(image: ImageMetadata): Promise<void> {
-    const key = `project_images_${image.projectId}`;
-    const images = await this.getProjectImages(image.projectId);
-    images.push(image);
-    localStorage.setItem(key, JSON.stringify(images));
-  },
-
-  async deleteImage(projectId: string, imageId: string): Promise<void> {
-    const key = `project_images_${projectId}`;
-    const images = await this.getProjectImages(projectId);
-    const filtered = images.filter((img) => img.id !== imageId);
-    localStorage.setItem(key, JSON.stringify(filtered));
-  },
-};
-
-/**
- * Hook for generating images
+ * Hook for async image generation with job tracking
  */
 export function useGenerateImage() {
   const queryClient = useQueryClient();
+  const { addJob, updateJob, removeJob } = useProjectStore();
 
   return useMutation({
-    mutationFn: async (params: GenerationParams): Promise<GenerationResult> => {
+    mutationFn: async (params: GenerationParams): Promise<{ jobId: string; params: GenerationParams }> => {
+      // Create a batch ID for grouping related jobs
+      const batchId = uuidv4();
+      const jobIds: string[] = [];
+
+      // Create individual jobs for each image in the batch
+      for (let i = 0; i < params.numImages; i++) {
+        const jobId = uuidv4();
+        const job: GenerationJob = {
+          id: jobId,
+          projectId: params.projectId,
+          prompt: params.prompt,
+          size: params.size,
+          numImages: 1, // Each job generates 1 image
+          watermark: params.watermark,
+          referenceImages: params.referenceImages?.map((f) => f.name) || [],
+          status: 'pending',
+          progress: 0,
+          createdAt: new Date().toISOString(),
+          // Batch information
+          batchId,
+          imageIndex: i + 1,
+          totalInBatch: params.numImages,
+        };
+
+        // Add each job to queue
+        addJob(job);
+        jobIds.push(jobId);
+      }
+
       try {
-        // Create FormData for file uploads
+        // Start generation in background
         const formData = new FormData();
         formData.append('prompt', params.prompt);
         formData.append('size', params.size);
         formData.append('numImages', params.numImages.toString());
         formData.append('watermark', params.watermark.toString());
         formData.append('projectId', params.projectId);
+        formData.append('batchId', batchId);
 
-        // Append reference images if provided
         if (params.referenceImages && params.referenceImages.length > 0) {
           params.referenceImages.forEach((file) => {
             formData.append('referenceImages', file);
           });
         }
 
-        // Call Next.js API route
-        const response = await fetch('/api/generate', {
+        // Update all jobs in batch to processing
+        jobIds.forEach((id) => {
+          updateJob(id, { status: 'processing', startedAt: new Date().toISOString() });
+        });
+
+        // Start generation (no await - runs in background)
+        fetch('/api/generate', {
           method: 'POST',
           body: formData,
-        });
+        })
+          .then(async (response) => {
+            if (!response.ok) {
+              const errorData = await response.json().catch(() => ({}));
+              throw new Error(errorData.error || `API request failed: ${response.status}`);
+            }
+            return response.json();
+          })
+          .then((data) => {
+            // Images are already saved incrementally by the API route
+            // No need to save here - just update job status
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || `API request failed: ${response.status}`);
-        }
+            // Update all jobs in batch as completed
+            jobIds.forEach((id) => {
+              updateJob(id, {
+                status: 'completed',
+                progress: 100,
+                completedAt: new Date().toISOString(),
+              });
+              // Remove each job after 2 seconds
+              setTimeout(() => removeJob(id), 2000);
+            });
 
-        const data = await response.json();
+            // Invalidate queries to refresh images
+            queryClient.invalidateQueries({
+              queryKey: imageKeys.project(params.projectId),
+            });
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
+          })
+          .catch((error) => {
+            // Update all jobs in batch as failed
+            jobIds.forEach((id) => {
+              updateJob(id, {
+                status: 'failed',
+                error: error instanceof Error ? error.message : 'Unknown error',
+                completedAt: new Date().toISOString(),
+              });
+              // Remove each failed job after 5 seconds
+              setTimeout(() => removeJob(id), 5000);
+            });
+          });
 
-        // Create image metadata from API response
-        const images: ImageMetadata[] = data.images.map((img: any) => ({
-          id: uuidv4(),
-          projectId: params.projectId,
-          prompt: params.prompt,
-          size: params.size,
-          watermark: params.watermark,
-          referenceImages: [],
-          generatedUrl: img.url,
-          createdAt: new Date().toISOString(),
-        }));
-
-        // Save to local storage
-        for (const image of images) {
-          await imageStorage.saveImage(image);
-        }
-
-        return {
-          success: true,
-          images,
-        };
+        // Return immediately with first job ID (for backward compatibility)
+        return { jobId: jobIds[0], params };
       } catch (error) {
-        return {
-          success: false,
-          images: [],
-          error: error instanceof Error ? error.message : 'Unknown error occurred',
-        };
-      }
-    },
-    onSuccess: (result, params) => {
-      if (result.success) {
-        // Optimistically update project images cache
-        queryClient.setQueryData<ImageMetadata[]>(
-          imageKeys.project(params.projectId),
-          (old) => {
-            return old ? [...old, ...result.images] : result.images;
-          }
-        );
-
-        // Invalidate to ensure consistency
-        queryClient.invalidateQueries({
-          queryKey: imageKeys.project(params.projectId),
+        // Update all jobs as failed
+        jobIds.forEach((id) => {
+          updateJob(id, {
+            status: 'failed',
+            error: error instanceof Error ? error.message : 'Unknown error',
+            completedAt: new Date().toISOString(),
+          });
         });
-
-        // Update project's image count
-        queryClient.invalidateQueries({ queryKey: ['projects'] });
+        throw error;
       }
     },
     onError: (error: Error) => {
@@ -134,19 +146,50 @@ export function useGenerateImage() {
 }
 
 /**
- * Hook for fetching project images
+ * Hook for simulating progress updates (every 2 seconds)
+ */
+export function useJobProgressSimulation() {
+  const { jobs, updateJob } = useProjectStore();
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    intervalRef.current = setInterval(() => {
+      jobs.forEach((job) => {
+        if (job.status === 'processing' && job.progress < 90) {
+          updateJob(job.id, { progress: Math.min(job.progress + 10, 90) });
+        }
+      });
+    }, 2000);
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [jobs, updateJob]);
+}
+
+/**
+ * Hook for fetching project images with real-time polling
+ * ⭐ Polls every 2 seconds to show images as they're generated
  */
 export function useProjectImages(projectId: string) {
   return useQuery({
     queryKey: imageKeys.project(projectId),
-    queryFn: () => imageStorage.getProjectImages(projectId),
+    queryFn: async () => {
+      const response = await fetch(`/api/images?projectId=${projectId}`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch project images');
+      }
+      const data = await response.json();
+      return data.images || [];
+    },
     enabled: !!projectId, // Only fetch if projectId is provided
-    staleTime: 1000 * 60 * 5, // 5 minutes
+    refetchInterval: 2000, // ⭐ Poll every 2 seconds for real-time updates
+    staleTime: 1000, // Consider data stale after 1 second
   });
 }
 
 /**
- * Hook for deleting an image
+ * Hook for deleting an image via API
  */
 export function useDeleteImage() {
   const queryClient = useQueryClient();
@@ -159,7 +202,16 @@ export function useDeleteImage() {
       projectId: string;
       imageId: string;
     }) => {
-      await imageStorage.deleteImage(projectId, imageId);
+      const response = await fetch(
+        `/api/images?projectId=${projectId}&imageId=${imageId}`,
+        { method: 'DELETE' }
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to delete image');
+      }
+
       return { projectId, imageId };
     },
     onMutate: async ({ projectId, imageId }) => {
@@ -207,7 +259,7 @@ export function useDeleteImage() {
 }
 
 /**
- * Hook for batch deleting images
+ * Hook for batch deleting images via API
  */
 export function useBatchDeleteImages() {
   const queryClient = useQueryClient();
@@ -221,7 +273,15 @@ export function useBatchDeleteImages() {
       imageIds: string[];
     }) => {
       await Promise.all(
-        imageIds.map((imageId) => imageStorage.deleteImage(projectId, imageId))
+        imageIds.map((imageId) =>
+          fetch(`/api/images?projectId=${projectId}&imageId=${imageId}`, {
+            method: 'DELETE',
+          }).then((res) => {
+            if (!res.ok) {
+              throw new Error('Failed to delete image');
+            }
+          })
+        )
       );
       return { projectId, imageIds };
     },

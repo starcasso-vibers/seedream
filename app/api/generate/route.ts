@@ -152,6 +152,22 @@ export async function POST(request: NextRequest) {
           };
 
           generatedImages.push(generatedImage);
+
+          // ⭐ Real-time save: Immediately persist each image so users can see it
+          const existingImages = await storage.getProjectImages(projectId);
+          const updatedImages = [...existingImages, generatedImage];
+          await storage.setProjectImages(projectId, updatedImages);
+
+          // Update project metadata immediately
+          const currentProjects = await storage.getProjects();
+          const currentProjectIndex = currentProjects.findIndex((p) => p.id === projectId);
+          if (currentProjectIndex !== -1) {
+            currentProjects[currentProjectIndex].imageCount = updatedImages.length;
+            currentProjects[currentProjectIndex].updatedAt = new Date().toISOString();
+            await storage.setProjects(currentProjects);
+          }
+
+          console.log(`✅ Saved image ${i + 1}/${numImages} in real-time`);
         }
       } catch (error) {
         console.error(`Error generating image ${i + 1}:`, error);
@@ -170,21 +186,20 @@ export async function POST(request: NextRequest) {
 
     console.log(`=== Successfully generated ${generatedImages.length} images ===`);
 
-    // Update project images
-    const existingImages = await storage.getProjectImages(projectId);
-    const allImages = [...existingImages, ...generatedImages];
-    await storage.setProjectImages(projectId, allImages);
-
-    // Update project metadata
-    const project = projects[projectIndex];
-    project.imageCount = allImages.length;
-    project.updatedAt = new Date().toISOString();
-    await storage.setProjects(projects);
+    // Final project state refresh (for response only, already saved incrementally)
+    const finalProjects = await storage.getProjects();
+    const finalProject = finalProjects.find((p) => p.id === projectId);
+    if (!finalProject) {
+      return NextResponse.json(
+        { error: 'Project not found after generation' },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json(
       {
         images: generatedImages,
-        project,
+        project: finalProject,
       },
       { status: 201 }
     );

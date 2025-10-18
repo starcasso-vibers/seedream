@@ -1,13 +1,15 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Project } from '@/features/project-management/types/project';
+import type { GenerationJob } from '@/features/image-generation/types/generation-job';
 import { v4 as uuidv4 } from 'uuid';
 
 interface ProjectStore {
   projects: Project[];
   activeProjectId: string | null;
+  jobs: GenerationJob[];
 
-  // Actions
+  // Project Actions
   setProjects: (projects: Project[]) => void;
   setActiveProject: (id: string | null) => void;
   addProject: (name: string, description?: string) => Promise<void>;
@@ -16,13 +18,22 @@ interface ProjectStore {
   incrementImageCount: (id: string) => void;
   updateCoverImage: (id: string, imageUrl: string) => void;
   loadProjects: () => Promise<void>;
+
+  // Job Queue Actions
+  addJob: (job: GenerationJob) => void;
+  updateJob: (jobId: string, updates: Partial<GenerationJob>) => void;
+  removeJob: (jobId: string) => void;
+  getJobsByProject: (projectId: string) => GenerationJob[];
+  getActiveJobCount: (projectId: string) => number;
+  getAllActiveJobs: () => GenerationJob[];
 }
 
 export const useProjectStore = create<ProjectStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       projects: [],
       activeProjectId: null,
+      jobs: [],
 
       setProjects: (projects) => set({ projects }),
 
@@ -119,6 +130,45 @@ export const useProjectStore = create<ProjectStore>()(
         } catch (error) {
           console.error('Error loading projects:', error);
         }
+      },
+
+      // Job Queue Actions
+      addJob: (job) =>
+        set((state) => ({
+          jobs: [...state.jobs, job],
+        })),
+
+      updateJob: (jobId, updates) =>
+        set((state) => ({
+          jobs: state.jobs.map((job) =>
+            job.id === jobId ? { ...job, ...updates } : job
+          ),
+        })),
+
+      removeJob: (jobId) =>
+        set((state) => ({
+          jobs: state.jobs.filter((job) => job.id !== jobId),
+        })),
+
+      getJobsByProject: (projectId) => {
+        const state = get();
+        return state.jobs.filter((job) => job.projectId === projectId);
+      },
+
+      getActiveJobCount: (projectId) => {
+        const state = get();
+        return state.jobs.filter(
+          (job) =>
+            job.projectId === projectId &&
+            (job.status === 'pending' || job.status === 'processing')
+        ).length;
+      },
+
+      getAllActiveJobs: () => {
+        const state = get();
+        return state.jobs.filter(
+          (job) => job.status === 'pending' || job.status === 'processing'
+        );
       },
     }),
     {

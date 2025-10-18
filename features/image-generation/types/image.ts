@@ -4,7 +4,7 @@
  */
 
 export type ImageSize = "2K" | "4K";
-export type NumImages = 1 | 2 | 3 | 4;
+export type NumImages = number; // 1-10 range validated by Zod schema
 
 export interface GenerationParams {
   prompt: string;

@@ -41,7 +41,7 @@ interface ProjectSidebarProps {
 }
 
 export function ProjectSidebar({ isOpen, onToggle }: ProjectSidebarProps) {
-  const { projects, activeProjectId, setActiveProject, addProject, updateProject, deleteProject } =
+  const { projects, activeProjectId, setActiveProject, addProject, updateProject, deleteProject, getActiveJobCount } =
     useProjectStore();
 
   // Mobile drawer state (controlled by parent if props provided)
@@ -126,10 +126,13 @@ export function ProjectSidebar({ isOpen, onToggle }: ProjectSidebarProps) {
               <p className="text-xs">Create your first project to get started</p>
             </div>
           ) : (
-            projects.map((project) => {
+            [...projects]
+              .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+              .map((project) => {
               const isActive = project.id === activeProjectId;
               const imageCount = project.images?.length || 0;
               const coverImage = project.images?.[0];
+              const activeJobsCount = getActiveJobCount(project.id);
 
               return (
                 <Card
@@ -207,12 +210,17 @@ export function ProjectSidebar({ isOpen, onToggle }: ProjectSidebarProps) {
                         </DropdownMenu>
                       </div>
 
-                      {/* Image Count Badge */}
-                      <div className="flex items-center gap-2">
+                      {/* Image Count and Active Jobs Badges */}
+                      <div className="flex items-center gap-2 flex-wrap">
                         <Badge variant="secondary" className="h-5 text-xs">
                           <ImageIcon className="mr-1 h-3 w-3" />
                           {imageCount}
                         </Badge>
+                        {activeJobsCount > 0 && (
+                          <Badge variant="default" className="h-5 text-xs bg-primary/90 animate-pulse">
+                            🔄 {activeJobsCount} generating
+                          </Badge>
+                        )}
                         <span className="text-xs text-muted-foreground">
                           {formatDistanceToNow(new Date(project.updatedAt), {
                             addSuffix: true,
@@ -223,7 +231,7 @@ export function ProjectSidebar({ isOpen, onToggle }: ProjectSidebarProps) {
                   </div>
                 </Card>
               );
-            })
+              })
           )}
         </div>
       </ScrollArea>

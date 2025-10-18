@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import Image from 'next/image';
-import { Download, Trash2 } from 'lucide-react';
+import { Download, Trash2, Copy, Clipboard } from 'lucide-react';
 import { format } from 'date-fns';
 import {
   Card,
@@ -29,6 +29,29 @@ interface ImageCardProps {
 export function ImageCard({ image, onDelete }: ImageCardProps) {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleCopyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(image.prompt);
+    } catch (error) {
+      console.error('Failed to copy prompt:', error);
+    }
+  };
+
+  const handleCopyImage = async () => {
+    try {
+      const response = await fetch(image.generatedUrl);
+      const blob = await response.blob();
+
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          [blob.type]: blob
+        })
+      ]);
+    } catch (error) {
+      console.error('Failed to copy image:', error);
+    }
+  };
 
   const handleDownload = async () => {
     try {
@@ -78,9 +101,20 @@ export function ImageCard({ image, onDelete }: ImageCardProps) {
         </CardHeader>
 
         <CardContent className="p-4">
-          <p className="line-clamp-2 text-sm text-foreground/80">
-            {image.prompt}
-          </p>
+          <div className="flex items-start justify-between gap-2">
+            <p className="line-clamp-2 text-sm text-foreground/80 flex-1">
+              {image.prompt}
+            </p>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0"
+              onClick={handleCopyPrompt}
+              title="Copy prompt"
+            >
+              <Copy className="h-3 w-3" />
+            </Button>
+          </div>
           <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-1">
               {image.size}
@@ -101,9 +135,19 @@ export function ImageCard({ image, onDelete }: ImageCardProps) {
             variant="outline"
             size="sm"
             className="flex-1"
+            onClick={handleCopyImage}
+            title="Copy image to clipboard"
+          >
+            <Clipboard className="h-4 w-4 mr-1" />
+            Copy
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1"
             onClick={handleDownload}
           >
-            <Download className="h-4 w-4" />
+            <Download className="h-4 w-4 mr-1" />
             Download
           </Button>
           <Button
